@@ -26,13 +26,13 @@ function getSubModuleName {
     echo "--------------------------------------------------------------------------------" >&2
 
     if [[ $module_name == "quality-measures" ]]; then
-        local framed_url="https://gitlab-ci-token:$ci_token@gitlab.com/hps-92618-group/knowledge-graphs/$module_name.git"
+        local framed_url="https://gitlab-ci-token:$ci_token@gitlab.com/xyz-92618-group/knowledge-graphs/$module_name.git"
     
     elif [[ $module_name == "drug-safety" ]]; then
-        local framed_url="https://gitlab-ci-token:$ci_token@gitlab.com/hps-92618-group/knowledge-graphs/$module_name.git"
+        local framed_url="https://gitlab-ci-token:$ci_token@gitlab.com/xyz-92618-group/knowledge-graphs/$module_name.git"
     
     else
-        local framed_url="https://gitlab-ci-token:$ci_token@gitlab.com/hps-92618-group/cloud-engineering/$module_name.git"
+        local framed_url="https://gitlab-ci-token:$ci_token@gitlab.com/xyz-92618-group/cloud-engineering/$module_name.git"
     fi
 
     local remote_sha=$(git ls-remote -q "$framed_url" "$sub_branch" | xargs | cut -d" " -f1)
