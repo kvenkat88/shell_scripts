@@ -1,0 +1,157 @@
+# https://stackoverflow.com/questions/54761464/how-to-use-if-else-condition-on-gitlabci
+# https://stackoverflow.com/questions/54586870/alpine-linux-package-installed-but-module-not-found
+# http://scriptedonachip.com/git-sparse-checkout
+
+image: docker:stable
+
+stages:
+    - cleanup_job
+    - functional_perf_tests
+
+variables:
+    APP_NAME: "p360"
+    RUN_TEST: "functional"
+    TEST_TYPE: "regression"
+
+CleanUp_Unused_Docker_Images:
+    stage: cleanup_job
+    tags:
+        - shell-runner
+    variables:
+        GIT_STRATEGY: none #No need to download the project code in this stage
+    script:
+        # Remove all unused containers, networks, images (both dangling and unreferenced), and optionally, volumes and --volume for Delete if there is currently no container using the volume
+        - docker system prune -f --volumes 
+
+    when: always
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
+
+Run_Functional_Selenium_Tests:
+    stage: functional_perf_tests
+    before_script:
+        - |
+            if [ "$APP_NAME" == "covidclinic360" ]; then
+                export DIR_NAME="covidclinic360"
+                export REPO_NAME="covidclinic360"
+                export SUB_DIR_NAME="tests/covid360_web_automation"
+                export BRANCH_NAME="COVID19"
+                export APP_HOST_NAME="${INF360_APP_HOST_NAME}"
+                export REPORT_COLLECTION_PATH="reports"
+            
+            elif [ "$APP_NAME" == "covid360" ]; then
+                export DIR_NAME="covid360"
+                export REPO_NAME="covidclinic360-360"
+                export SUB_DIR_NAME="tests/covid360_web_automation"
+                export BRANCH_NAME="master"
+                export APP_HOST_NAME="${covid360_APP_HOST_NAME}"
+                export REPORT_COLLECTION_PATH="reports"
+            else 
+                echo "I am in Other/Else section - $APP_NAME"
+                export DIR_NAME="none"
+                export REPO_NAME="none"
+                export SUB_DIR_NAME="none"
+                export BRANCH_NAME="master"
+                export APP_HOST_NAME="none"
+                export REPORT_COLLECTION_PATH="reports"
+            fi
+            
+        - apk update && apk add --no-cache python3 py-pip curl git
+        - python3 --version
+        - pip3 install --upgrade pip setuptools
+        - pip install pytest PyYAML selenium pytest-html python-gitlab
+    
+    services:
+        - selenium/standalone-chrome
+        - selenium/standalone-chrome-debug
+        
+    only:
+        refs:
+            - master
+        variables:
+            - '$RUN_TEST == "functional"'
+            - '$RUN_TEST == "all"'
+    tags:
+        - docker-runner
+        
+    script:
+        - echo "$APP_NAME"
+        - echo "Checking the below cURL Request to verify $APP_NAME Services are up and running!!!!!!"
+        - curl -v "${APP_HOST_NAME}"
+        - echo "###############################################################################"
+        - echo "$CI_PROJECT_DIR"
+        #- cd "$CI_PROJECT_DIR"
+        #- ls
+        - echo "###############################################################################"
+        - chmod a+x utility/specific_folder_download.sh
+        - sh utility/specific_folder_download.sh ${DIR_NAME} ${CI_JOB_TOKEN} ${REPO_NAME} ${SUB_DIR_NAME} ${BRANCH_NAME}
+        - cd $CI_PROJECT_DIR/${DIR_NAME}/${SUB_DIR_NAME}/
+        - >
+            if [ $APP_NAME == "covid360" -a $TEST_TYPE == "regression" ]; then
+               # Eg:: p360 as app name and regression as test type, all regression tests would be executed
+               echo "Started executing the regression test cases for $APP_NAME"
+               SELENIUM="http://selenium__standalone-chrome:4444/wd/hub" BASE_URL=${APP_HOST_NAME} DRIVER="headless_chrome" pytest -v tests/registered --html=${REPORT_COLLECTION_PATH}/${APP_NAME}_functional_selenium_regression_test_report_$(date +'%m_%d_%Y').html --self-contained-html
+            
+            elif [ $APP_NAME == "covidclinic360" -a $TEST_TYPE == "regression" ]; then
+               echo "Started executing the regression test cases for $APP_NAME"
+               SELENIUM="http://selenium__standalone-chrome:4444/wd/hub" BASE_URL=${APP_HOST_NAME} DRIVER="headless_chrome" pytest -v tests/registered --html=${REPORT_COLLECTION_PATH}/${APP_NAME}_functional_selenium_regression_test_report_$(date +'%m_%d_%Y').html --self-contained-html
+            
+            elif [ $APP_NAME == "covid360" -a $TEST_TYPE == "smoke" ]; then
+               echo "Started executing the smoke test cases for $APP_NAME"
+               SELENIUM="http://selenium__standalone-chrome:4444/wd/hub" BASE_URL=${APP_HOST_NAME} DRIVER="headless_chrome" pytest -v tests/registered --html=${REPORT_COLLECTION_PATH}/${APP_NAME}_functional_selenium_smoke_test_report_$(date +'%m_%d_%Y').html --self-contained-html
+             
+            elif [ $APP_NAME == "covidclinic360" -a $TEST_TYPE == "smoke" ]; then
+               # Eg:: p360 as app name and regression as test type, all regression tests would be executed
+               echo "Started executing the smoke test cases for $APP_NAME"
+               SELENIUM="http://selenium__standalone-chrome:4444/wd/hub" BASE_URL=${APP_HOST_NAME} DRIVER="headless_chrome" pytest -v tests/registered --html=${REPORT_COLLECTION_PATH}/${APP_NAME}_functional_selenium_smoke_test_report_$(date +'%m_%d_%Y').html --self-contained-html
+           
+            else 
+               echo "I am in Other/Else section - $APP_NAME" 
+            fi
+    after_script:
+        - sleep 20
+        #- python3 $CI_PROJECT_DIR/utility/gitlab_interaction.py -u $GITLAB_ACCESS_URL -t $PJT_ACCESS_TOKEN -pid $PROJECT_ID_FOR_API_HIT -id $ISSUE_ID -file "$CI_PROJECT_DIR/$APP_NAME/tests/covid360_web_automation/reports/"
+        - |
+            if [ "$APP_NAME" == "covid360" ]; then
+                echo "Uploading the test reports for the app - $APP_NAME"
+                python3 $CI_PROJECT_DIR/utility/gitlab_interaction.py -u $GITLAB_ACCESS_URL -t $PJT_ACCESS_TOKEN -pid $PROJECT_ID_FOR_API_HIT -id $ISSUE_ID -file "$CI_PROJECT_DIR/$APP_NAME/tests/covid3600_web_automation/reports/"
+
+            elif [ "$APP_NAME" == "covidclinic360" ]; then
+                echo "Uploading the test reports for the app - $APP_NAME"
+                python3 $CI_PROJECT_DIR/utility/gitlab_interaction.py -u $GITLAB_ACCESS_URL -t $PJT_ACCESS_TOKEN -pid $PROJECT_ID_FOR_API_HIT -id $ISSUE_ID -file "$CI_PROJECT_DIR/$APP_NAME/tests/covid360_web_automation/reports/"
+            
+            else
+                echo "No Apps found for uploading the test reports to Gitlab Ticket"
+            fi
+    artifacts:
+        name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+        paths:
+            - "$CI_PROJECT_DIR/$APP_NAME/tests/*/reports/*.html"
+        expire_in: 1 yrs 0 mos and 0d
+        when: always
+
+Run_Performance_Tests:
+    stage: functional_perf_tests
+    image: 
+        name: justb4/jmeter:latest
+        entrypoint: [""]
+    only:
+        refs:
+            - master
+        variables:
+            - '$RUN_TEST == "performance"'
+            - '$RUN_TEST == "all"'
+    tags:
+        - docker-runner
+        
+    script:
+        - echo "$APP_NAME"
+        - echo "Performance  scripts"
+        - mkdir testresults
+        - /entrypoint.sh -n -t $CI_PROJECT_DIR/Performance_Scripts/GitPerf.jmx -l ./testresults.log -e -o ./testresults
+
+    artifacts:
+        paths:
+            - testresults
+    
