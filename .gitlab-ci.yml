@@ -1,0 +1,131 @@
+image: docker:stable
+
+stages:
+    - cleanup_job
+    - build_docker_image
+    - push_to_aws_ecr_registry
+
+# Newly added submodules won't be available to pipeline(docker image build or push comparision) at the start(first time). User     # have to invoke one more time.
+
+before_script:
+    - rm -rf .variables $HOME/builds/data/xyz-api-builder/.processedVariables
+    - chmod a+x git_submodule_diff_identifier.sh
+
+    # To identify whether any changes happened in the xyz-data-pipeline and xyz-pylib sub-project/sub-directory/cloned project changes
+    - chmod a+x git_subdir_from_repo_diff_identifier.sh
+
+    # export to .variables file and run git_submodule_diff_identifier.sh shell script using source linux command
+    - echo 'export RETRIEVED_SUBMODULE_NAMES_FOR_IMAGE_BUILD="$(sh git_submodule_diff_identifier.sh ${CI_JOB_TOKEN})"' >> .variables
+    
+    # export to .variables file and run git_subdir_from_repo_diff_identifier.sh shell script using source linux command 
+    # As a input to git_subdir_from_repo_diff_identifier.sh script, have to pass sub-dir name eg - xyz-data-pipeline
+    - echo 'export IDENTIFIED_SHA_ID_BEFORE_PIPELINE_START="$(sh git_subdir_from_repo_diff_identifier.sh xyz-data-pipeline)"' >> .variables
+    
+    - echo 'export IDENTIFIED_SHA_ID_STATUS_XYZ_PYLIB="$(sh git_subdir_from_repo_diff_identifier.sh xyz-pylib ${CI_JOB_TOKEN})"' >> .variables
+
+    - source .variables
+
+    # Save the retrieved sub modules list in .processedVariables file under the path /home/ec2-user/builds/data/xyz-api-builder
+    - echo "RETRIEVED_SUBMODULE_NAMES=$RETRIEVED_SUBMODULE_NAMES_FOR_IMAGE_BUILD" >> $HOME/builds/data/xyz-api-builder/.processedVariables
+
+    # Save the retrieved SHA ID in .processedVariables file under the path /home/ec2-user/builds/data/xyz-api-builder
+    - echo "RETRIEVED_SHA_ID_BEFORE_PIPELINE_START=$IDENTIFIED_SHA_ID_BEFORE_PIPELINE_START" >> $HOME/builds/data/xyz-api-builder/.processedVariables
+
+    # Save the retrieved SHA ID modified status in .processedVariables file under the path /home/ec2-user/builds/data/xyz-api-builder for xyz-pylib project
+    - echo "RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB=$IDENTIFIED_SHA_ID_STATUS_XYZ_PYLIB" >> $HOME/builds/data/xyz-api-builder/.processedVariables
+
+CleanUp_Unused_Docker_Images:
+    stage: cleanup_job
+    variables:
+        GIT_STRATEGY: none #Option to omit "git checkout" 
+    tags:
+        - shell-hab
+    only:
+        - master
+    script:
+        # Remove all unused containers, networks, images (both dangling and unreferenced), and optionally, volumes and --volume for Delete if there is currently no container using the volume
+        - docker system prune -f --volumes 
+
+    when: always
+
+Build_Docker_Image:
+    stage: build_docker_image
+    tags:
+        - shell-hab
+    only:
+        - master
+    variables:
+        GIT_SUBMODULE_STRATEGY: none
+    before_script:
+        # Removing the git cached files
+        - rm -rf xyz-pylib nlg p360 infectious-disease symptom-graph risk-scores visualization notifications xyz-dashboard-api measure-graphs quality-measures drug-safety
+        
+        # Downloading the project dependency - covid360-pylib pjt
+        - git clone https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/xyz-group/cloud-engineering/covid360-pylib.git
+    
+        # Download dependent project - covid360 api as sub-module
+        - git submodule add -b master --force https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/xyz-group/cloud-engineering/covid360.git
+
+        # Download dependent project - disease api as sub-module
+        - git submodule add -b master --force https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/xyz-group/cloud-engineering/disease.git
+
+        # Temporary Hack: Through pipeline unable to generate _tmp file under XYZ_api_builder main directory
+        - mkdir _tmp
+
+        # Make Git submodules work
+        - which git || (apk --no-cache add git)
+        - git submodule sync --recursive
+        - git submodule update  --remote --recursive
+
+        # Retrieve the SHA ID for xyz-data-pipeline sub directory after repository is updated or first stage is completed
+        - chmod a+x git_subdir_from_repo_diff_identifier.sh
+        - export IDENTIFIED_SHA_ID_AFTER_PIPELINE_START="$(sh git_subdir_from_repo_diff_identifier.sh xyz-data-pipeline)"
+        - echo "IDENTIFIED_SHA_ID_AFTER_PIPELINE_START value is $IDENTIFIED_SHA_ID_AFTER_PIPELINE_START"
+        
+    script:
+        - source $HOME/builds/data/xyz-api-builder/.processedVariables
+        - echo "Retrieved submodules name from Stage Variables are ${RETRIEVED_SUBMODULE_NAMES}"
+        - echo "in Script section IDENTIFIED_SHA_ID_AFTER_PIPELINE_START value is $IDENTIFIED_SHA_ID_AFTER_PIPELINE_START"
+        
+        - >
+            if [[ "${RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB}" == "true" || "$FORCE_REBUILD" == "true" ]]; then
+                make prod-image
+            else
+                echo "There is no need to build all sub-projects or sub directory available and status retrieved(RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB flag) is $RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB. So if there any single sub project changed status identified, it would invoke below command execution."
+                make prod-image-from-cicd CI_INSTRUCT_EXE_FLAG="from_ci" FETCH_SUBMODULE_NAME_FROM_GITLAB_CICD="${RETRIEVED_SUBMODULE_NAMES}" XYZ_DATA_PIPELINE_BEFORE_START="${RETRIEVED_SHA_ID_BEFORE_PIPELINE_START}" XYZ_DATA_PIPELINE_AFTER_START="${IDENTIFIED_SHA_ID_AFTER_PIPELINE_START}"
+            fi
+
+        #- make prod-image-from-cicd CI_INSTRUCT_EXE_FLAG="from_ci" FETCH_SUBMODULE_NAME_FROM_GITLAB_CICD="${RETRIEVED_SUBMODULE_NAMES}" XYZ_DATA_PIPELINE_BEFORE_START="${RETRIEVED_SHA_ID_BEFORE_PIPELINE_START}" XYZ_DATA_PIPELINE_AFTER_START="${IDENTIFIED_SHA_ID_AFTER_PIPELINE_START}"
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
+
+AWS_ECR_Registry_Push:
+    stage: push_to_aws_ecr_registry
+    variables:
+        GIT_STRATEGY: none #Option to omit "git checkout" 
+    tags:
+        - shell-hab
+    only:
+        - master
+    before_script:
+        # Retrieve the SHA ID for xyz-data-pipeline sub directory after repository is updated or first stage is completed
+        - chmod a+x git_subdir_from_repo_diff_identifier.sh
+        - export IDENTIFIED_SHA_ID_AFTER_PIPELINE_START="$(sh git_subdir_from_repo_diff_identifier.sh xyz-data-pipeline)"
+        - echo "IDENTIFIED_SHA_ID_AFTER_PIPELINE_START value is $IDENTIFIED_SHA_ID_AFTER_PIPELINE_START"
+    script:
+        - source $HOME/builds/data/xyz-api-builder/.processedVariables
+        - echo "Retrieved submodules name from Stage Variables are ${RETRIEVED_SUBMODULE_NAMES}"
+        - echo "in Script section IDENTIFIED_SHA_ID_AFTER_PIPELINE_START value is $IDENTIFIED_SHA_ID_AFTER_PIPELINE_START"
+        - >
+            if [[ "${RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB}" == "true" || "$FORCE_REBUILD" == "true" ]]; then
+                make prod-push
+            else
+                echo "There is no need to build all sub-projects or sub directory available and status retrieved(RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB flag) is $RETRIEVED_SHA_ID_STATUS_XYZ_PYLIB. So if there any single sub project changed status identified, it would invoke below command execution."
+                make prod-push-from-cicd CI_INSTRUCT_EXE_FLAG="from_ci" FETCH_SUBMODULE_NAME_FROM_GITLAB_CICD="${RETRIEVED_SUBMODULE_NAMES}" XYZ_DATA_PIPELINE_BEFORE_START="${RETRIEVED_SHA_ID_BEFORE_PIPELINE_START}" XYZ_DATA_PIPELINE_AFTER_START="${IDENTIFIED_SHA_ID_AFTER_PIPELINE_START}"
+            fi
+        #- make prod-push-from-cicd CI_INSTRUCT_EXE_FLAG="from_ci" FETCH_SUBMODULE_NAME_FROM_GITLAB_CICD="${RETRIEVED_SUBMODULE_NAMES}" XYZ_DATA_PIPELINE_BEFORE_START="${RETRIEVED_SHA_ID_BEFORE_PIPELINE_START}" XYZ_DATA_PIPELINE_AFTER_START="${IDENTIFIED_SHA_ID_AFTER_PIPELINE_START}"
+        - make print-latest-builds
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
