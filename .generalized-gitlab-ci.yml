@@ -1,0 +1,224 @@
+# This is a GitLab CI configuration to build the project as a docker image
+# The file is generic enough to be dropped in a project containing a working Dockerfile
+
+# do not use "latest" here, if you want this to work in the future
+image: docker:stable
+# image: python:3.9-slim
+
+stages:
+    - cleanup_job
+    - build_docker_image
+    - run_docker_image
+    - test_docker_image
+    - push_to_aws_registry
+    - add_tag
+
+variables:
+    # Common Global Variables
+    DOCKER_ENV_TAG: "dev-"
+    AWS_REGION: "us-east-2"
+    BRANCH_NAME: "master"
+
+    # App Specific Global Variables
+    DOCKER_COVID360_GOOGLE_TAG: "covid360-hps-${DOCKER_ENV_TAG//-}" #remove hyphen from string
+    DOCKER_COVIDINF360_GOOGLE_TAG: "covidinf360-hps-${DOCKER_ENV_TAG//-}"
+    DOCKER_TAG_VERSION: '1.0.0'
+    CONTAINER_PORT: 10001
+    COVIDP360_GOOGLE_PORT: 10001
+    COVIDINF360_GOOGLE_PORT: 10010
+    TAG_NAME_FOR_BUILD: "covidpat360_covidinf360_opt_image"
+
+cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+        - /app/node_modules/
+
+before_script:
+    - rm -rf patient-360.git
+    - pwd
+    - export COMMIT_TIME=$(git show -s --format=%cd --date=format:%m%d%Y-%H-%M $CI_COMMIT_SHA)
+    - export COVIDP360_AWS_ECR_URL_HPS="${P360_AWS_ECR_URL_HPS}${DOCKER_ENV_TAG}${COMMIT_TIME}"
+    - echo "${COVIDP360_AWS_ECR_URL_HPS}"
+    - export COVIDINF360_AWS_ECR_URL_HPS="${COVIDINF360_AWS_ECR_URL_HPS}${DOCKER_ENV_TAG}${COMMIT_TIME}"
+    - echo "${COVIDINF360_AWS_ECR_URL_HPS}"
+
+    # docker login asks for the password to be passed through stdin for security
+    # we use $CI_JOB_TOKEN here which is a special token provided by GitLab CI Runner
+    
+    - docker info
+    - echo -n $CI_JOB_TOKEN | docker login -u gitlab-ci-token --password-stdin $CI_REGISTRY
+    - pip3 install awscli --upgrade --user
+    
+    # Removing previous cloned version of npm dependency.
+    - rm -rf hps-npmlib
+    # Downloading the project dependency - hps-npmlib pjt
+    - git clone https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/hps-92618-group/cloud-engineering/hps-npmlib.git
+
+    # Uncomment this section only if there is any issue in python/python package installations
+    # Below section would install/upgrade the homebrew package installer and install the latest version of the python for our environment
+    #- sh -c "$(curl -fsSL https://raw.githubusercontent.com/Linuxbrew/install/master/install.sh)"
+    #- test -d ~/.linuxbrew && eval $(~/.linuxbrew/bin/brew shellenv)
+    #- test -d /home/linuxbrew/.linuxbrew && eval $(/home/linuxbrew/.linuxbrew/bin/brew shellenv)
+    #- test -r ~/.bash_profile && echo "eval \$($(brew --prefix)/bin/brew shellenv)" >>~/.bash_profile
+    #- echo "eval \$($(brew --prefix)/bin/brew shellenv)" >>~/.profile
+    #- brew reinstall python #for python2-python@2
+    
+
+CleanUp_Unused_Docker_Images_COVID360360_COVIDINF360_Optimized:
+    stage: cleanup_job
+    tags:
+        - covid360_shell
+    script:
+        # Remove all unused containers, networks, images (both dangling and unreferenced), and optionally, volumes and --volume for Delete if there is currently no container using the volume
+        - docker system prune -f --volumes 
+
+    when: always
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
+        
+Build_COVIDP360_COVIDINF360_Optimized_Docker_Image:
+    stage: build_docker_image
+    tags:
+        - p360_shell
+    only:
+        - master
+    script:
+        - docker build -t $TAG_NAME_FOR_BUILD --build-arg REACT_APP_BRAND=Google --build-arg REACT_APP_PORT=$CONTAINER_PORT .
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
+
+Run_COVIDP360_Optimized_Docker_Image_for_Testing:
+    stage: run_docker_image
+    tags:
+        - covid360_shell
+    only:
+        - master
+    script:
+        - docker stop $DOCKER_COVIDP360_HPS_TAG || true && docker rm $DOCKER_COVIDP360_HPS_TAG || true
+        - docker run --rm -d --name "${DOCKER_COVIDP360_GOOGLE_TAG}" -p $COVIDP360_HPS_PORT:$CONTAINER_PORT --env-file $HOME/builds/env/covid360/.env --env REACT_APP_BRAND=Google $TAG_NAME_FOR_BUILD
+        - sleep 20
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
+
+Run_COVIDINF360_Optimized_Docker_Image_for_Testing:
+    stage: run_docker_image
+    tags:
+        - covid360_shell
+    only:
+        - master
+    script:
+        - docker stop $DOCKER_INF360_HPS_TAG || true && docker rm $DOCKER_COVIDINF360_HPS_TAG || true
+        - docker run --rm -d --name "${DOCKER_COVIDINF360_GOOGLE_TAG}" -p $COVIDINF360_GOOGLE_PORT:$CONTAINER_PORT --env-file $HOME/builds/env/covidinf360/.env --env REACT_APP_BRAND=Google $TAG_NAME_FOR_BUILD
+        - sleep 20
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
+
+Test_COVIDP360_Portal_Selenium:
+    stage: test_docker_image
+    before_script:
+        #- apk update && apk add --no-cache openssl-dev libffi-dev python3 py-pip curl
+        - python3 --version
+        - pip3 install --upgrade pip
+        - pip3 install pytest
+        - pip3 install PyYAML
+        - pip3 install selenium
+        - pip3 install pytest-html
+        - pip3 install python-gitlab
+        - pip3 install pytz
+        - pip3 install docker-compose
+        - pip3 install pytest-xdist
+        - pip3 install pycmd
+        - pip3 install filelock
+        - docker-compose --version
+        - docker-compose -f docker-compose-hub-grid.yml down
+        - docker-compose -f docker-compose-hub-grid.yml up --build -d
+    tags:
+        #- covid360_docker  # Before sel grid we used this
+        - covid360_shell
+    only:
+        refs:
+            - master
+        variables:
+            - '$RUN_TEST == "true"'
+            - $CI_COMMIT_MESSAGE =~ /Run Tests/
+    script:
+        - echo "Checking the below cURL Request to verify COVIDP360/COVIDIF360 Services are up and running!!!!!!"
+        - curl -v http://$COVIDP360_DOCKER_HOSTED_SERVER:$P360_GOOGLE_PORT
+        - echo "###############################################################################"
+        - echo "$CI_PROJECT_DIR"
+        - cd $CI_PROJECT_DIR/tests/covidp360_web_automation
+        - sleep 20
+        - curl -v http://localhost:7776/status # Selenium grid
+        - curl -v http://localhost:7776/ui/index.html
+        - export SELENIUM="http://localhost:7776/wd/hub" 
+        - export BASE_URL="http://$COVIDP360_DOCKER_HOSTED_SERVER:$P360_GOOGLE_PORT"
+        - export DRIVER="sel_grid"
+        
+        # Performing parallel test execution using pytest-xdist library and argument for referring this -n auto(it will fetch the no of cores available in machine and makes parallel execution). We can provide nos also.
+        - py.cleanup -p && py.test -v --cache-clear -n auto --dist loadscope --platform sel_grid tests/registered --html=reports/registered/registered_tests.html --self-contained-html
+    #allow_failure: true
+    after_script:
+        - docker-compose -f docker-compose-hub-grid.yml down
+    artifacts:
+        name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+        paths:
+            - $CI_PROJECT_DIR/tests/covidp360_web_automation/reports/registered
+        expire_in: 1 yrs 0 mos and 0d
+        when: always
+
+Push_COVIDP360_Docker_Image_to_AWS_ECR:
+    stage: push_to_aws_registry
+    tags:
+        - covid360_shell
+    only:
+        refs:
+            - master
+        variables:
+            - $CI_COMMIT_MESSAGE =~ /ECR Deploy/
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).        
+    script:
+        - echo "I am in AWS Push Section Stage"
+        - $(aws ecr get-login --no-include-email --region $AWS_REGION)
+        - docker tag $TAG_NAME_FOR_BUILD $COVIDP360_AWS_ECR_URL_GOOGLE
+        - docker push $COVIDP360_AWS_ECR_URL_GOOGLE
+
+Push_COVIDINF360_Docker_Image_to_AWS_ECR:
+    stage: push_to_aws_registry
+    tags:
+        - covid360_shell
+    only:
+        refs:
+            - master
+        variables:
+            - $CI_COMMIT_MESSAGE =~ /ECR Deploy/
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).        
+    script:
+        - echo "I am in AWS Push Section Stage"
+        - $(aws ecr get-login --no-include-email --region $AWS_REGION)
+        - docker tag $TAG_NAME_FOR_BUILD $COVIDINF360_AWS_ECR_URL_GOOGLE
+        - docker push $COVIDINF360_AWS_ECR_URL_GOOGLE
+
+Add_COVID360_HPS_Base_Git_Tag_ECR_Image_Pushed:
+    stage: add_tag
+    tags:
+        - covid360_shell
+    only:
+        refs:
+            - master
+        variables:
+            - $CI_COMMIT_MESSAGE =~ /ECR Deploy/
+    script:
+        - echo "$CI_PROJECT_DIR"
+        - python3 $CI_PROJECT_DIR/cicd_utility/gitlab_interaction.py -u ${GITLAB_PROJECT_URL} -t ${PROJECT_SECRET_TOKEN} -pid ${PROJECT_ID} -tag "${DOCKER_ENV_TAG}${COMMIT_TIME}" -b "${BRANCH_NAME}"
+    when: always
+    retry:
+        max: 1
+        when: always #Retry on any failure (default).
